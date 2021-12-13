@@ -339,3 +339,7 @@ class Callback(abc.ABC):
     def on_before_zero_grad(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", optimizer: Optimizer) -> None:
         """Called before ``optimizer.zero_grad()``."""
         pass
+
+    def on_compress_model(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+        """Called for quantization with Intel Neural Compressor tool."""
+        pass

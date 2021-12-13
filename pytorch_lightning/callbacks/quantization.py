@@ -18,6 +18,7 @@ Quantization
 """
 import copy
 import functools
+from enum import Enum
 from typing import Any, Callable, Dict, Optional, Sequence, Union
 
 import torch
@@ -35,11 +36,18 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks.base import Callback
 from pytorch_lightning.utilities import _TORCH_GREATER_EQUAL_1_10
 from pytorch_lightning.utilities.exceptions import MisconfigurationException
+from pytorch_lightning.trainer.states import TrainerFn
 
 if _TORCH_GREATER_EQUAL_1_10:
     from torch.ao.quantization.qconfig import QConfig
 else:
     from torch.quantization import QConfig
+
+
+class QuantizationMode(Enum):
+    PTQ_DYNAMIC = "post_training_dynamic_quant"
+    PTQ_STATIC = "post_training_static_quant"
+    QAT = "quant_aware_training"
 
 
 def wrap_qat_forward_context(
@@ -318,3 +326,92 @@ class QuantizationAwareTraining(Callback):
     def on_predict_end(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
         if "predict" in self._observer_disabled_stages:
             self._restore_last_observer_enabled()
+
+
+class INCQuantization(Callback):
+    """Quantization allows speeding up inference and decreasing memory requirements by performing computations and
+    storing tensors at lower bitwidths (such as INT8) than floating point precision.
+    And this callback will quantized model with Intel Neural Compressor(INC) tool.
+
+
+    Args:
+
+        config_path_or_obj: config file or Quantization_Conf class for INC:
+
+        monitor: Specified metric which will be computed in evaluation function.
+
+        dirpath: save path where the quantization config and weights be saved to
+
+    .. Intel Neural Compressor: https://github.com/intel/neural-compressor
+    """
+    def __init__(
+        self,
+        config_path_or_obj,
+        monitor: str,
+        dirpath: str = None,
+    ) -> None:
+        try:
+            from neural_compressor.conf.config import Quantization_Conf
+        except ImportError as e:
+            raise RuntimeError(
+                    'Please install neural-compressor with: pip install neural-compressor') from e
+
+        self.config = (
+            config_path_or_obj
+            if isinstance(config_path_or_obj, Quantization_Conf)
+            else Quantization_Conf(config_path_or_obj)
+        )
+        self.approach = self.config.usr_cfg.quantization.approach
+        assert monitor is not None, "Please set metric name for evaluation loop!"
+        self.monitor = monitor
+        self.dirpath = dirpath
+
+    def on_compress_model(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:
+        """Called when the compressor loop begins."""
+        try:
+            from neural_compressor.experimental import Quantization, common
+        except ImportError as e:
+            raise RuntimeError(
+                    'Please install neural-compressor with: pip install neural-compressor') from e
+
+        @staticmethod
+        def eval_func(model):
+            pl_module_tmp = copy.deepcopy(pl_module)
+            pl_module_tmp.model = model
+            out = trainer.validate(pl_module_tmp)
+            trainer.state.fn = TrainerFn.COMPRESSING
+            return out[0][self.monitor]
+
+        @staticmethod
+        def train_func(model):
+            pl_module_tmp = copy.deepcopy(pl_module)
+            pl_module_tmp.model = model
+            trainer.fit(pl_module_tmp)
+            trainer.state.fn = TrainerFn.COMPRESSING
+            return pl_module_tmp.model
+
+        assert hasattr(pl_module, "model"), \
+            "The LightningModule should have the backbone model which is a native PyTorch model!"
+
+        if self.dirpath is None:
+            self.dirpath = trainer.default_root_dir
+
+        quantizer = Quantization(self.config)
+        quantizer.model = common.Model(pl_module.model)
+
+        if self.approach == QuantizationMode.PTQ_STATIC.value:
+            quantizer.calib_dataloader = pl_module.train_dataloader()
+        elif self.approach == QuantizationMode.QAT.value:
+            quantizer.q_func = train_func
+        elif self.approach == QuantizationMode.PTQ_DYNAMIC.value:
+            trainer.post_quantizing = True
+        else:
+            raise MisconfigurationException(
+                "The quantization approach should be set here"
+            )
+
+        quantizer.eval_func = eval_func
+        model = quantizer()
+        pl_module.model = model.model
+        if self.dirpath is not None:
+            model.save(self.dirpath)

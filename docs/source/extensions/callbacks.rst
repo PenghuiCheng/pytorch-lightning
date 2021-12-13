@@ -95,6 +95,7 @@ Lightning has a few built-in callbacks.
     EarlyStopping
     GPUStatsMonitor
     GradientAccumulationScheduler
+    INCQuantization
     LambdaCallback
     LearningRateMonitor
     ModelCheckpoint
@@ -497,3 +498,9 @@ on_before_zero_grad
 
 .. automethod:: pytorch_lightning.callbacks.Callback.on_before_zero_grad
     :noindex:
+
+on_compress_model
+~~~~~~~~~~~~~~~~~
+
+..automethod:: pytorch_lightning.callbacks.Callback.on_compress_model
+    :noindex

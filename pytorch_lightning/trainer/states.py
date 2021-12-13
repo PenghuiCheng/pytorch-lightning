@@ -43,6 +43,7 @@ class TrainerFn(LightningEnum):
     TESTING = "test"
     PREDICTING = "predict"
     TUNING = "tune"
+    COMPRESSING = "compress"
 
     @property
     def _setup_fn(self) -> "TrainerFn":
@@ -64,6 +65,7 @@ class RunningStage(LightningEnum):
         - ``TrainerFn.TESTING`` - ``RunningStage.TESTING``
         - ``TrainerFn.PREDICTING`` - ``RunningStage.PREDICTING``
         - ``TrainerFn.TUNING`` - ``RunningStage.{TUNING,SANITY_CHECKING,TRAINING,VALIDATING}``
+        - ``TrainerFn.COMPRESSING`` - ``RunningStage.QUANTIZING``
     """
 
     TRAINING = "train"
@@ -72,6 +74,7 @@ class RunningStage(LightningEnum):
     TESTING = "test"
     PREDICTING = "predict"
     TUNING = "tune"
+    QUANTIZING = "quantize"
 
     @property
     def evaluating(self) -> bool:

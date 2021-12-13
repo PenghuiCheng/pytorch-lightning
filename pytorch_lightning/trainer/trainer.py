@@ -29,6 +29,7 @@ from torch.optim import Optimizer
 import pytorch_lightning as pl
 from pytorch_lightning.accelerators import Accelerator, IPUAccelerator
 from pytorch_lightning.callbacks import Callback, EarlyStopping, ModelCheckpoint, ProgressBarBase
+# from pytorch_lightning.callbacks.quantization import INCQuantization
 from pytorch_lightning.callbacks.prediction_writer import BasePredictionWriter
 from pytorch_lightning.core.datamodule import LightningDataModule
 from pytorch_lightning.core.optimizer import LightningOptimizer
@@ -1072,6 +1073,92 @@ class Trainer(
 
         return result
 
+    def compress(
+        self,
+        model: "pl.LightningModule",
+        train_dataloaders: Optional[Union[TRAIN_DATALOADERS, LightningDataModule]] = None,
+        val_dataloaders: Optional[EVAL_DATALOADERS] = None,
+        datamodule: Optional[LightningDataModule] = None,
+        ckpt_path: Optional[str] = None,
+    ) -> None:
+        r"""
+        Runs the full optimization routine.
+
+        Args:
+            model: Model to fit.
+
+            train_dataloaders: A collection of :class:`torch.utils.data.DataLoader` or a
+                :class:`~pytorch_lightning.core.datamodule.LightningDataModule` specifying training samples.
+                In the case of multiple dataloaders, please see this :ref:`page <multiple-training-dataloaders>`.
+
+            val_dataloaders: A :class:`torch.utils.data.DataLoader` or a sequence of them specifying validation samples.
+
+            ckpt_path: Path/URL of the checkpoint from which training is resumed. If there is
+                no checkpoint file at the path, an exception is raised. If resuming from mid-epoch checkpoint,
+                training will start from the beginning of the next epoch.
+
+            datamodule: An instance of :class:`~pytorch_lightning.core.datamodule.LightningDataModule`.
+
+        """
+        Trainer._log_api_event("compress")
+
+        self.training_type_plugin.model = model
+
+        self.state.fn = TrainerFn.COMPRESSING
+        self.state.status = TrainerStatus.RUNNING
+        self.quantizing = True
+
+        # if a datamodule comes in as the second arg, then fix it for the user
+        if isinstance(train_dataloaders, LightningDataModule):
+            datamodule = train_dataloaders
+            train_dataloaders = None
+        # If you supply a datamodule you can't supply train_dataloader or val_dataloaders
+        if (train_dataloaders is not None or val_dataloaders is not None) and datamodule is not None:
+            raise MisconfigurationException(
+                "You cannot pass `train_dataloader` or `val_dataloaders` to `trainer.fit(datamodule=...)`"
+            )
+
+        # links data to the trainer
+        self._data_connector.attach_data(
+            model, train_dataloaders=train_dataloaders, val_dataloaders=val_dataloaders, datamodule=datamodule
+        )
+
+        if hasattr(model, "hparams"):
+            parsing.clean_namespace(model.hparams)
+
+        # attach model to the training type plugin
+        self.training_type_plugin.connect(model)
+
+        self._callback_connector._attach_model_callbacks()
+        self._callback_connector._attach_model_logging_functions()
+
+        verify_loop_configurations(self)
+
+        # hook
+        self._data_connector.prepare_data()
+
+        self._call_callback_hooks("on_before_accelerator_backend_setup")
+        self.training_type_plugin.setup_environment()
+        self._call_setup_hook()  # allow user to setup lightning_module in accelerator environment
+
+        # check if we should delay restoring checkpoint till later
+        if not self.training_type_plugin.restore_checkpoint_after_pre_dispatch:
+            self._restore_modules_and_callbacks(ckpt_path)
+
+        self._call_configure_sharded_model()  # allow user to setup in model sharded environment
+        self.training_type_plugin.setup(self)
+
+        # reset logger connector
+        self.logger_connector.reset_results()
+        self.logger_connector.reset_metrics()
+
+        self._call_callback_hooks("on_compress_model")
+
+        assert self.state.stopped
+        self.quantizing = False
+
+        return None
+
     def _restore_modules_and_callbacks(self, checkpoint_path: Optional[_PATH] = None) -> None:
         # restore modules after setup
         self.checkpoint_connector.resume_start(checkpoint_path)
@@ -2094,6 +2181,17 @@ class Trainer(
         if val:
             self.state.stage = RunningStage.SANITY_CHECKING
         elif self.sanity_checking:
+            self.state.stage = None
+
+    @property
+    def quantizing(self) -> bool:
+        return self.state.stage == RunningStage.QUANTIZING
+
+    @quantizing.setter
+    def quantizing(self, val: bool) -> None:
+        if val:
+            self.state.stage = RunningStage.QUANTIZING
+        elif self.quantizing:
             self.state.stage = None
 
     """

@@ -304,6 +304,12 @@ class ModelHooks:
         implementation of this hook is idempotent.
         """
 
+    def on_compress_model(self) -> None:
+        """Hook to create quantized modules with Intel Neural Compressor tool
+
+        This hook is called during trainer.compressor stages.
+        """
+
 
 class DataHooks:
     """Hooks to be used for data related stuff."""
